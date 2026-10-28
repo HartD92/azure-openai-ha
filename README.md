@@ -65,6 +65,8 @@ This is equivalent to the built-in [OpenAI Conversation integration](https://www
 8. With Microsoft sign-in, enter the tenant ID and the ARM resource ID of your Foundry or Azure OpenAI **account**, link your Microsoft account, then select models separately for **Conversation**, **Data AI tasks**, **Image AI tasks**, **Speech-to-text**, and **Text-to-speech**. Nothing is preselected; only your selected deployment/service pairs are added. With an API key, enter the key and endpoint (for example `https://your-resource.services.ai.azure.com/`); the legacy conversation agent and AI task are created, and you select their deployment names manually.
 9. Select the desired conversation, speech-to-text, and text-to-speech entities in your Assist pipeline. Use the **Add** buttons if you want additional customized instances.
 
+HACS installs this integration from its repository source, so forks do not need a published release ZIP. When using a fork as a custom repository, select its default branch/latest commit if no releases exist. After a download-setting change, use HACS's **Update information** action before downloading again.
+
 Configurations created with versions before 5.0 are migrated automatically: the existing agent keeps its options and an AI task using the same deployment is added.
 
 ## Microsoft Entra ID browser sign-in
