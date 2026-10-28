@@ -12,7 +12,11 @@ from homeassistant.core import HomeAssistant
 from custom_components.azure_openai_conversation.const import (
     CONF_CHAT_MODEL,
     CONF_DEPLOYMENTS,
+    CONF_MAI_MODEL,
+    CONF_STT_BACKEND,
     DOMAIN,
+    RECOMMENDED_STT_MODEL,
+    STT_BACKEND_MAI_FILE,
 )
 from custom_components.azure_openai_conversation.deployments import (
     MANAGEMENT_ORIGIN,
@@ -373,3 +377,43 @@ def test_missing_services_exclude_added_and_legacy_defaults(
         "speak": ["tts"],
     }
     assert legacy["services"] == ["conversation", "ai_task_data"]
+
+
+@pytest.mark.parametrize("stale_deployment", [None, RECOMMENDED_STT_MODEL])
+def test_mai_is_not_an_openai_deployment(
+    hass: HomeAssistant, stale_deployment: str | None
+) -> None:
+    """Discovery neither overwrites MAI metadata nor hides available OpenAI STT."""
+    inventory = [
+        DeploymentData(
+            id=f"{RESOURCE_ID}/deployments/{RECOMMENDED_STT_MODEL}",
+            name=RECOMMENDED_STT_MODEL,
+            model_name=RECOMMENDED_STT_MODEL,
+            services=["stt"],
+            unsupported_reason="",
+        )
+    ]
+    data = {
+        CONF_STT_BACKEND: STT_BACKEND_MAI_FILE,
+        CONF_MAI_MODEL: "MAI-Transcribe-2",
+    }
+    if stale_deployment is not None:
+        data[CONF_CHAT_MODEL] = stale_deployment
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_DEPLOYMENTS: inventory},
+        subentries_data=[{
+            "subentry_type": "stt",
+            "title": "Keep MAI",
+            "unique_id": None,
+            "data": data,
+        }],
+    )
+    entry.add_to_hass(hass)
+    original = next(iter(entry.subentries.values()))
+    assert missing_deployment_services(entry, inventory) == inventory
+    assert not sync_deployment_subentries(hass, entry)
+    assert original.data == data
+    assert sync_deployment_subentries(hass, entry, deployment_subentries(inventory))
+    assert len(entry.subentries) == 2
+    assert original.data == data

@@ -73,12 +73,14 @@ from .const import (
     CONF_CODE_INTERPRETER,
     CONF_MAX_TOKENS,
     CONF_IMAGE_MODEL,
+    CONF_MAI_MODEL,
     CONF_MODEL_NAME,
     CONF_PRO_MODE,
     CONF_REASONING_EFFORT,
     CONF_REASONING_SUMMARY,
     CONF_SEND_SAMPLING_PARAMETERS,
     CONF_STORE_RESPONSES,
+    CONF_STT_BACKEND,
     CONF_TEMPERATURE,
     CONF_TOP_P,
     CONF_VERBOSITY,
@@ -94,6 +96,7 @@ from .const import (
     LOGGER,
     RECOMMENDED_CHAT_MODEL,
     RECOMMENDED_MAX_TOKENS,
+    RECOMMENDED_MAI_MODEL,
     RECOMMENDED_PRO_MODE,
     RECOMMENDED_REASONING_SUMMARY,
     RECOMMENDED_SEND_SAMPLING_PARAMETERS,
@@ -104,6 +107,7 @@ from .const import (
     RECOMMENDED_VERBOSITY,
     RECOMMENDED_WEB_SEARCH_CONTEXT_SIZE,
     RECOMMENDED_WEB_SEARCH_INLINE_CITATIONS,
+    STT_BACKEND_MAI_FILE,
     get_recommended_reasoning_effort,
 )
 from .schema import adjust_schema
@@ -589,7 +593,9 @@ class AzureOpenAIBaseLLMEntity(Entity):
             identifiers={(DOMAIN, subentry.subentry_id)},
             name=subentry.title,
             manufacturer="Azure OpenAI",
-            model=subentry.data.get(
+            model=subentry.data.get(CONF_MAI_MODEL, RECOMMENDED_MAI_MODEL)
+            if subentry.data.get(CONF_STT_BACKEND) == STT_BACKEND_MAI_FILE
+            else subentry.data.get(
                 CONF_IMAGE_MODEL
                 if subentry.subentry_type == "ai_task_image"
                 else CONF_CHAT_MODEL,

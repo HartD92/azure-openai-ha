@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from contextlib import suppress
 import json
 import logging
 import time
@@ -66,6 +67,7 @@ from .const import (
     CONF_IMAGE_QUALITY,
     CONF_DEPLOYMENTS,
     CONF_MAX_TOKENS,
+    CONF_MAI_MODEL,
     CONF_MODEL_NAME,
     CONF_PRO_MODE,
     CONF_REASONING_EFFORT,
@@ -73,6 +75,8 @@ from .const import (
     CONF_RECOMMENDED,
     CONF_SEND_SAMPLING_PARAMETERS,
     CONF_STORE_RESPONSES,
+    CONF_SPEECH_ENDPOINT,
+    CONF_STT_BACKEND,
     CONF_RESOURCE_ID,
     CONF_TEMPERATURE,
     CONF_TENANT_ID,
@@ -96,6 +100,7 @@ from .const import (
     DEFAULT_TTS_NAME,
     DOMAIN,
     IMAGE_MODELS,
+    MAI_MODELS,
     RECOMMENDED_AI_TASK_OPTIONS,
     RECOMMENDED_CHAT_MODEL,
     RECOMMENDED_CODE_INTERPRETER,
@@ -103,6 +108,7 @@ from .const import (
     RECOMMENDED_IMAGE_MODEL,
     RECOMMENDED_IMAGE_QUALITY,
     RECOMMENDED_MAX_TOKENS,
+    RECOMMENDED_MAI_MODEL,
     RECOMMENDED_PRO_MODE,
     RECOMMENDED_REASONING_SUMMARY,
     RECOMMENDED_SEND_SAMPLING_PARAMETERS,
@@ -120,6 +126,8 @@ from .const import (
     RECOMMENDED_WEB_SEARCH_INLINE_CITATIONS,
     RECOMMENDED_WEB_SEARCH_USER_LOCATION,
     STT_MODELS,
+    STT_BACKEND_MAI_FILE,
+    STT_BACKEND_OPENAI,
     TTS_MODELS,
     UNSUPPORTED_CODE_INTERPRETER_MODELS,
     UNSUPPORTED_MODELS,
@@ -138,6 +146,7 @@ from .deployments import (
     sync_deployment_subentries,
     validate_resource_id,
 )
+from .transcription import validate_speech_endpoint
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1338,7 +1347,7 @@ class AzureOpenAISubentryImageFlowHandler(ConfigSubentryFlow):
 
 
 class AzureOpenAISubentrySTTFlowHandler(ConfigSubentryFlow):
-    """Flow for managing Azure OpenAI STT subentries."""
+    """Flow for managing OpenAI and Microsoft Speech STT subentries."""
 
     options: dict[str, Any]
 
@@ -1346,6 +1355,11 @@ class AzureOpenAISubentrySTTFlowHandler(ConfigSubentryFlow):
     def _is_new(self) -> bool:
         """Return if this is a new subentry."""
         return self.source == "user"
+
+    @property
+    def _is_entra(self) -> bool:
+        """Return whether the parent uses Microsoft account authentication."""
+        return self._get_entry().data.get(CONF_AUTH_TYPE) == AUTH_ENTRA_ID
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -1355,6 +1369,8 @@ class AzureOpenAISubentrySTTFlowHandler(ConfigSubentryFlow):
         self.options[CONF_CHAT_MODEL] = _default_deployment(
             self._get_entry(), "stt", RECOMMENDED_STT_MODEL
         )
+        if self._is_entra:
+            return await self.async_step_backend()
         return await self.async_step_init()
 
     async def async_step_reconfigure(
@@ -1362,7 +1378,120 @@ class AzureOpenAISubentrySTTFlowHandler(ConfigSubentryFlow):
     ) -> SubentryFlowResult:
         """Handle reconfiguration of a subentry."""
         self.options = self._get_reconfigure_subentry().data.copy()
+        if self._is_entra:
+            return await self.async_step_backend()
         return await self.async_step_init()
+
+    async def async_step_backend(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Choose a transcription backend for a Microsoft account."""
+        if self._get_entry().state is not ConfigEntryState.LOADED:
+            return self.async_abort(reason="entry_not_loaded")
+        if not self._is_entra:
+            return self.async_abort(reason="backend_not_supported")
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            backend = user_input.get(CONF_STT_BACKEND)
+            if backend not in (STT_BACKEND_OPENAI, STT_BACKEND_MAI_FILE):
+                errors[CONF_STT_BACKEND] = "backend_not_supported"
+            else:
+                self.options[CONF_STT_BACKEND] = backend
+                if backend == STT_BACKEND_MAI_FILE:
+                    return await self.async_step_mai()
+                return await self.async_step_init()
+        return self.async_show_form(
+            step_id="backend",
+            data_schema=probatio.Schema(
+                {
+                    probatio.Required(
+                        CONF_STT_BACKEND,
+                        default=self.options.get(CONF_STT_BACKEND, STT_BACKEND_OPENAI),
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[STT_BACKEND_OPENAI, STT_BACKEND_MAI_FILE],
+                            translation_key=CONF_STT_BACKEND,
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    )
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_mai(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Configure file transcription without deployment discovery metadata."""
+        if self._get_entry().state is not ConfigEntryState.LOADED:
+            return self.async_abort(reason="entry_not_loaded")
+        if (
+            not self._is_entra
+            or self.options.get(CONF_STT_BACKEND) != STT_BACKEND_MAI_FILE
+        ):
+            return self.async_abort(reason="backend_not_supported")
+        errors: dict[str, str] = {}
+        options = self.options.copy()
+        if user_input is not None:
+            options.update(user_input)
+            if options.get(CONF_STT_BACKEND) != STT_BACKEND_MAI_FILE:
+                return self.async_abort(reason="backend_not_supported")
+            if options.get(CONF_MAI_MODEL, RECOMMENDED_MAI_MODEL) not in MAI_MODELS:
+                errors[CONF_MAI_MODEL] = "model_not_supported"
+            try:
+                options[CONF_SPEECH_ENDPOINT] = validate_speech_endpoint(
+                    options.get(CONF_SPEECH_ENDPOINT, "")
+                )
+            except ValueError:
+                errors[CONF_SPEECH_ENDPOINT] = "invalid_speech_endpoint"
+            if not errors:
+                options.setdefault(CONF_MAI_MODEL, RECOMMENDED_MAI_MODEL)
+                for key in (
+                    CONF_CHAT_MODEL,
+                    CONF_MODEL_NAME,
+                    CONF_AUTO_DISCOVERED,
+                    CONF_PROMPT,
+                ):
+                    options.pop(key, None)
+                if self._is_new:
+                    return self.async_create_entry(
+                        title=options.pop(CONF_NAME), data=options
+                    )
+                return self.async_update_and_abort(
+                    self._get_entry(),
+                    self._get_reconfigure_subentry(),
+                    data=options,
+                    unique_id=None,
+                )
+
+        if CONF_SPEECH_ENDPOINT not in options:
+            with suppress(ValueError):
+                options[CONF_SPEECH_ENDPOINT] = validate_speech_endpoint(
+                    self._get_entry().data.get(CONF_API_BASE, "")
+                )
+        step_schema: VolDictType = {}
+        if self._is_new:
+            step_schema[probatio.Required(CONF_NAME, default=DEFAULT_STT_NAME)] = str
+        step_schema.update(
+            {
+                probatio.Required(
+                    CONF_MAI_MODEL,
+                    default=options.get(CONF_MAI_MODEL, RECOMMENDED_MAI_MODEL),
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=MAI_MODELS, mode=SelectSelectorMode.DROPDOWN
+                    )
+                ),
+                probatio.Required(CONF_SPEECH_ENDPOINT): str,
+            }
+        )
+        return self.async_show_form(
+            step_id="mai",
+            data_schema=self.add_suggested_values_to_schema(
+                probatio.Schema(step_schema), options
+            ),
+            errors=errors,
+        )
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -1371,6 +1500,8 @@ class AzureOpenAISubentrySTTFlowHandler(ConfigSubentryFlow):
         # abort if entry is not loaded
         if self._get_entry().state is not ConfigEntryState.LOADED:
             return self.async_abort(reason="entry_not_loaded")
+        if self.options.get(CONF_STT_BACKEND, STT_BACKEND_OPENAI) != STT_BACKEND_OPENAI:
+            return self.async_abort(reason="backend_not_supported")
 
         options = self.options
 
@@ -1413,9 +1544,17 @@ class AzureOpenAISubentrySTTFlowHandler(ConfigSubentryFlow):
 
         errors: dict[str, str] = {}
         if user_input is not None:
-            options.update(user_input)
-            if _model_supported(self, options[CONF_CHAT_MODEL], "stt"):
-                return _save_subentry(self, options)
+            candidate = {**options, **user_input}
+            if (
+                candidate.get(CONF_STT_BACKEND, STT_BACKEND_OPENAI)
+                != STT_BACKEND_OPENAI
+            ):
+                return self.async_abort(reason="backend_not_supported")
+            if _model_supported(self, candidate[CONF_CHAT_MODEL], "stt"):
+                candidate.pop(CONF_MAI_MODEL, None)
+                candidate.pop(CONF_SPEECH_ENDPOINT, None)
+                return _save_subentry(self, candidate)
+            options = candidate
             errors[CONF_CHAT_MODEL] = "model_not_supported"
 
         return self.async_show_form(

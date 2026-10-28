@@ -111,6 +111,19 @@ API keys authorize inference, not ARM deployment discovery. The manual API-key p
 
 For an Assist pipeline, a practical OpenAI pairing is **`gpt-transcribe` for STT** and **`gpt-4o-mini-tts` for TTS**, where those models are available in your Foundry account's region. TTS uses the REST `/openai/v1/audio/speech` endpoint. STT uses the deployment's REST `/openai/deployments/{deployment}/audio/transcriptions` endpoint with API version `2025-04-01-preview`, because Azure's v1 transcription endpoint returns `DeploymentNotFound`; if you use a gateway, make sure it forwards this route too.
 
+#### MAI file transcription (Microsoft Speech)
+
+MAI is an alternative speech-to-text backend for an **existing Foundry integration entry configured with Microsoft Entra ID sign-in**. Speech-only onboarding is not supported. API-key entries retain their OpenAI configuration and cannot use MAI.
+
+1. Enable Microsoft Speech access in a supported resource/region and give the **signed-in user** the resource-scoped **Cognitive Services Speech User** role. OpenAI User access alone is not sufficient for Speech.
+2. Under the existing integration entry, manually **Add speech-to-text service**, then select **MAI file transcription (Microsoft Speech)**. MAI is not an OpenAI deployment and is not added by deployment discovery.
+3. Choose **MAI-Transcribe-2** (default) or **MAI-Transcribe-1.5** and enter the Speech resource root, such as `https://your-resource.cognitiveservices.azure.com/`. Only HTTPS resource roots in `.cognitiveservices.azure.com` are accepted: no API path, query, credentials, fragment, custom host, or port other than 443. The parent endpoint is suggested only when it already meets these requirements.
+4. Select the new speech-to-text entity in your Assist pipeline. MAI uses the linked account's token, never a resource API key, and offers no OpenAI deployment or instructions fields.
+
+Reconfigure an Entra speech-to-text service to switch between OpenAI and MAI while retaining its entity identity. Switching to MAI removes OpenAI deployment metadata and instructions; switching back removes the MAI model and Speech endpoint settings. MAI currently accepts mono, 16 kHz, 16-bit WAV/PCM from Assist and advertises the selected model's supported languages. See Microsoft's [MAI transcription documentation](https://learn.microsoft.com/en-us/azure/ai-services/speech-service/mai-transcribe) for availability and model details.
+
+This backend supports **file transcription only**. The transcription backend interface receives the live audio stream so a future `MAI-Transcribe-2-Streaming` backend can send PCM incrementally without buffering a WAV file. Streaming is not implemented or selectable yet.
+
 **`gpt-realtime-2.1` is not a drop-in STT or TTS model for these endpoints.** Realtime speech-to-speech models use a separate streaming API with WebRTC, WebSocket, or SIP sessions; supporting them requires a dedicated realtime implementation. Discovery therefore reports realtime models as unsupported rather than creating incompatible STT/TTS entities. The realtime-only `gpt-live-transcribe` and `gpt-realtime-whisper` models are also excluded. See Microsoft's [audio model catalog](https://learn.microsoft.com/azure/foundry/foundry-models/concepts/models-sold-directly-by-azure#audio-models) for current model versions and availability.
 
 #  Options
@@ -149,7 +162,7 @@ Depending on the underlying discovered model, including metadata retained after 
 
 If a deployment rejects an optional parameter, such as temperature for reasoning models, the request is retried without it.
 
-Speech-to-text and text-to-speech services let you choose the model deployment and instructions to improve the transcripts or control the voice, and the speed for text-to-speech. Editing instructions keeps the selected deployment. Azure `tts`/`tts-hd` and legacy `tts-1`/`tts-1-hd` models do not receive the unsupported instructions parameter.
+OpenAI speech-to-text and text-to-speech services let you choose the model deployment and instructions to improve the transcripts or control the voice, and the speed for text-to-speech. Editing instructions keeps the selected deployment. MAI speech-to-text instead offers a MAI model and Speech resource endpoint, with no instructions field. Azure `tts`/`tts-hd` and legacy `tts-1`/`tts-1-hd` models do not receive the unsupported instructions parameter.
 
 ## AI tasks
 

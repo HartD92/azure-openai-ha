@@ -6,11 +6,24 @@ from typing import Any, override
 from uuid import UUID
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import OAuth2TokenRequestConnectionError
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import (
+    ConfigEntryAuthFailed,
+    ConfigEntryError,
+    OAuth2TokenRequestConnectionError,
+)
 from homeassistant.helpers import config_entry_oauth2_flow
 
-from .const import CONF_TENANT_ID, DOMAIN, INFERENCE_SCOPE, MANAGEMENT_SCOPE
+from .const import (
+    AUTH_ENTRA_ID,
+    CONF_AUTH_TYPE,
+    CONF_TENANT_ID,
+    DOMAIN,
+    INFERENCE_SCOPE,
+    MANAGEMENT_SCOPE,
+)
+
+_INFERENCE_SESSIONS = f"{DOMAIN}_inference_sessions"
 
 
 class EntraOAuth2Implementation(
@@ -162,3 +175,37 @@ async def async_get_oauth_implementation(
     if not isinstance(implementation, EntraOAuth2Implementation):
         raise config_entry_oauth2_flow.UnknownImplementationError
     return implementation.with_tenant(entry.data[CONF_TENANT_ID])
+
+
+async def async_get_inference_session(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> config_entry_oauth2_flow.OAuth2Session:
+    """Share a renewable inference session and refresh lock across transports."""
+    if entry.data.get(CONF_AUTH_TYPE) != AUTH_ENTRA_ID:
+        raise ConfigEntryError("MAI transcription requires Microsoft Entra ID")
+    sessions: dict[str, config_entry_oauth2_flow.OAuth2Session] = hass.data.setdefault(
+        _INFERENCE_SESSIONS, {}
+    )
+    if entry.entry_id not in sessions:
+        try:
+            implementation = await async_get_oauth_implementation(hass, entry)
+        except ValueError as err:
+            raise ConfigEntryError("Invalid Entra tenant") from err
+        except config_entry_oauth2_flow.UnknownImplementationError as err:
+            raise ConfigEntryAuthFailed(
+                "Microsoft OAuth application credentials are missing"
+            ) from err
+        if entry.entry_id not in sessions:
+            sessions[entry.entry_id] = config_entry_oauth2_flow.OAuth2Session(
+                hass, entry, implementation
+            )
+
+            @callback
+            def remove_session() -> None:
+                """Discard the shared session on unload or failed setup."""
+                sessions.pop(entry.entry_id, None)
+
+            entry.async_on_unload(remove_session)
+    session = sessions[entry.entry_id]
+    await session.async_ensure_token_valid()
+    return session

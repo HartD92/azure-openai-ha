@@ -25,23 +25,34 @@ from homeassistant.helpers.translation import async_get_translations
 
 from custom_components.azure_openai_conversation.auth import EntraOAuth2Implementation
 from custom_components.azure_openai_conversation import async_create_entry_client
+from custom_components.azure_openai_conversation.config_flow import (
+    AzureOpenAISubentrySTTFlowHandler,
+)
 from custom_components.azure_openai_conversation.const import (
     AUTH_API_KEY,
     AUTH_ENTRA_ID,
     CONF_API_BASE,
     CONF_AUTH_TYPE,
+    CONF_AUTO_DISCOVERED,
     CONF_CHAT_MODEL,
     CONF_DEPLOYMENTS,
     CONF_IMAGE_MODEL,
     CONF_IMAGE_QUALITY,
     CONF_MODEL_NAME,
+    CONF_MAI_MODEL,
     CONF_REASONING_EFFORT,
     CONF_RESOURCE_ID,
     CONF_SEND_SAMPLING_PARAMETERS,
+    CONF_SPEECH_ENDPOINT,
+    CONF_STT_BACKEND,
     CONF_TEMPERATURE,
     CONF_TENANT_ID,
     CONF_TOP_P,
     DOMAIN,
+    MAI_MODELS,
+    RECOMMENDED_MAI_MODEL,
+    STT_BACKEND_MAI_FILE,
+    STT_BACKEND_OPENAI,
     get_image_quality_options,
 )
 from custom_components.azure_openai_conversation.deployments import (
@@ -1665,6 +1676,405 @@ async def test_speech_instruction_edit_does_not_change_the_deployment(
     assert subentry.data["prompt"] == "New instructions"
     assert subentry.subentry_id == original_id
     assert subentry.unique_id == "known-deployment-service"
+
+
+@pytest.fixture
+def entra_stt_entry(
+    hass: HomeAssistant,
+    oauth_data: dict,
+    deployment_inventory: list[DeploymentData],
+) -> MockConfigEntry:
+    """Provide an existing discovered transcription service with customized options."""
+    subentries = deployment_subentries(deployment_inventory, {"stt": ["listen"]})
+    subentries[0]["data"]["prompt"] = "Keep these instructions"
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={**oauth_data, CONF_DEPLOYMENTS: deployment_inventory},
+        state=ConfigEntryState.LOADED,
+        version=2,
+        subentries_data=subentries,
+    )
+    entry.add_to_hass(hass)
+    return entry
+
+
+@pytest.mark.parametrize("model", MAI_MODELS)
+@pytest.mark.parametrize(
+    ("parent_endpoint", "suggested"),
+    [
+        (ENDPOINT, None),
+        (
+            "https://speech.cognitiveservices.azure.com/",
+            "https://speech.cognitiveservices.azure.com",
+        ),
+    ],
+)
+async def test_mai_stt_add(
+    hass: HomeAssistant,
+    entra_stt_entry: MockConfigEntry,
+    model: str,
+    parent_endpoint: str,
+    suggested: str | None,
+) -> None:
+    """MAI is manually added with fixed model choices and a validated resource root."""
+    entry = entra_stt_entry
+    hass.config_entries.async_update_entry(
+        entry, data={**entry.data, CONF_API_BASE: parent_endpoint}
+    )
+    result = await hass.config_entries.subentries.async_init(
+        (entry.entry_id, "stt"), context={"source": "user"}
+    )
+    assert result["step_id"] == "backend"
+    fields = _form_fields(result)
+    assert fields[CONF_STT_BACKEND]["default"] == STT_BACKEND_OPENAI
+    assert fields[CONF_STT_BACKEND]["selector"]["select"]["options"] == [
+        STT_BACKEND_OPENAI,
+        STT_BACKEND_MAI_FILE,
+    ]
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {CONF_STT_BACKEND: STT_BACKEND_MAI_FILE}
+    )
+    assert result["step_id"] == "mai"
+    fields = _form_fields(result)
+    assert set(fields) == {"name", CONF_MAI_MODEL, CONF_SPEECH_ENDPOINT}
+    assert fields[CONF_MAI_MODEL]["default"] == RECOMMENDED_MAI_MODEL
+    assert fields[CONF_MAI_MODEL]["selector"]["select"]["options"] == MAI_MODELS
+    actual_suggestion = (
+        fields[CONF_SPEECH_ENDPOINT].get("description", {}).get("suggested_value")
+    )
+    assert (
+        actual_suggestion.rstrip("/") if actual_suggestion is not None else None
+    ) == suggested
+    with patch(f"{CONFIG_FLOW}._save_subentry") as deployment_save:
+        result = await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            {
+                "name": "MAI speech",
+                CONF_MAI_MODEL: model,
+                CONF_SPEECH_ENDPOINT: "https://speech.cognitiveservices.azure.com/",
+            },
+        )
+    deployment_save.assert_not_called()
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    subentry = next(
+        item for item in entry.subentries.values() if item.title == "MAI speech"
+    )
+    assert subentry.unique_id is None
+    assert subentry.data[CONF_STT_BACKEND] == STT_BACKEND_MAI_FILE
+    assert subentry.data[CONF_MAI_MODEL] == model
+    assert subentry.data[CONF_SPEECH_ENDPOINT].rstrip("/") == (
+        "https://speech.cognitiveservices.azure.com"
+    )
+    assert (
+        not {
+            CONF_CHAT_MODEL,
+            CONF_MODEL_NAME,
+            CONF_AUTO_DISCOVERED,
+            "prompt",
+        }
+        & subentry.data.keys()
+    )
+
+
+async def test_entra_stt_add_openai(
+    hass: HomeAssistant, entra_stt_entry: MockConfigEntry
+) -> None:
+    """Microsoft accounts can still manually add a deployed OpenAI transcription model."""
+    entry = entra_stt_entry
+    result = await hass.config_entries.subentries.async_init(
+        (entry.entry_id, "stt"), context={"source": "user"}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {CONF_STT_BACKEND: STT_BACKEND_OPENAI}
+    )
+    assert result["step_id"] == "init"
+    fields = _form_fields(result)
+    assert set(fields) == {"name", "prompt", CONF_CHAT_MODEL}
+    assert fields[CONF_CHAT_MODEL]["default"] == "listen"
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        {"name": "Manual OpenAI speech", CONF_CHAT_MODEL: "listen"},
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    subentry = next(
+        item
+        for item in entry.subentries.values()
+        if item.title == "Manual OpenAI speech"
+    )
+    assert subentry.data == {
+        CONF_STT_BACKEND: STT_BACKEND_OPENAI,
+        CONF_CHAT_MODEL: "listen",
+        CONF_MODEL_NAME: "gpt-4o-mini-transcribe",
+    }
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://speech.cognitiveservices.azure.com/",
+        "https://speech.openai.azure.com/",
+        "https://speech.services.ai.azure.com/",
+        "https://speech.cognitiveservices.azure.com.evil.example/",
+        "https://cognitiveservices.azure.com/",
+        "https://speech.cognitiveservices.azure.com/transcribe",
+        "https://speech.cognitiveservices.azure.com/?api-version=1",
+        "https://speech.cognitiveservices.azure.com/#fragment",
+        "https://user@speech.cognitiveservices.azure.com/",
+        "https://speech.cognitiveservices.azure.com:8443/",
+        "not-an-endpoint",
+    ],
+)
+async def test_mai_stt_switch_validates_before_clearing_deployment_metadata(
+    hass: HomeAssistant, entra_stt_entry: MockConfigEntry, endpoint: str
+) -> None:
+    """Invalid MAI settings must never modify the original discovered OpenAI service."""
+    entry = entra_stt_entry
+    subentry = next(iter(entry.subentries.values()))
+    original_id, original_title = subentry.subentry_id, subentry.title
+    original_data, original_unique_id = dict(subentry.data), subentry.unique_id
+    assert original_unique_id is not None
+    assert original_data[CONF_AUTO_DISCOVERED] is True
+    result = await hass.config_entries.subentries.async_init(
+        (entry.entry_id, "stt"),
+        context={"source": "reconfigure", "subentry_id": original_id},
+    )
+    assert result["step_id"] == "backend"
+    assert _form_fields(result)[CONF_STT_BACKEND]["default"] == STT_BACKEND_OPENAI
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {CONF_STT_BACKEND: STT_BACKEND_MAI_FILE}
+    )
+    assert set(_form_fields(result)) == {CONF_MAI_MODEL, CONF_SPEECH_ENDPOINT}
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        {CONF_MAI_MODEL: RECOMMENDED_MAI_MODEL, CONF_SPEECH_ENDPOINT: endpoint},
+    )
+    assert result["errors"] == {CONF_SPEECH_ENDPOINT: "invalid_speech_endpoint"}
+    assert subentry.data == original_data
+    assert subentry.unique_id == original_unique_id
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        {
+            CONF_MAI_MODEL: "MAI-Transcribe-1.5",
+            CONF_SPEECH_ENDPOINT: "https://speech.cognitiveservices.azure.com:443/",
+        },
+    )
+    assert result["reason"] == "reconfigure_successful"
+    assert subentry.subentry_id == original_id
+    assert subentry.title == original_title
+    assert subentry.unique_id is None
+    assert set(subentry.data) == {
+        CONF_STT_BACKEND,
+        CONF_MAI_MODEL,
+        CONF_SPEECH_ENDPOINT,
+    }
+
+
+async def test_mai_stt_switch_back_to_openai(
+    hass: HomeAssistant, entra_stt_entry: MockConfigEntry
+) -> None:
+    """Returning to OpenAI clears MAI-only settings without restoring discovery ownership."""
+    entry = entra_stt_entry
+    subentry = next(iter(entry.subentries.values()))
+    original_id = subentry.subentry_id
+    context = {"source": "reconfigure", "subentry_id": original_id}
+    result = await hass.config_entries.subentries.async_init(
+        (entry.entry_id, "stt"), context=context
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {CONF_STT_BACKEND: STT_BACKEND_MAI_FILE}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        {
+            CONF_MAI_MODEL: "MAI-Transcribe-1.5",
+            CONF_SPEECH_ENDPOINT: "https://speech.cognitiveservices.azure.com/",
+        },
+    )
+    mai_data = dict(subentry.data)
+    result = await hass.config_entries.subentries.async_init(
+        (entry.entry_id, "stt"), context=context
+    )
+    assert _form_fields(result)[CONF_STT_BACKEND]["default"] == STT_BACKEND_MAI_FILE
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {CONF_STT_BACKEND: STT_BACKEND_OPENAI}
+    )
+    assert result["step_id"] == "init"
+    assert set(_form_fields(result)) == {"prompt", CONF_CHAT_MODEL}
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {CONF_CHAT_MODEL: "not-deployed"}
+    )
+    assert result["errors"] == {CONF_CHAT_MODEL: "model_not_supported"}
+    assert subentry.data == mai_data
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {CONF_CHAT_MODEL: "listen", "prompt": "New instructions"}
+    )
+    assert result["reason"] == "reconfigure_successful"
+    assert subentry.subentry_id == original_id
+    assert subentry.unique_id is None
+    assert subentry.data == {
+        CONF_STT_BACKEND: STT_BACKEND_OPENAI,
+        CONF_CHAT_MODEL: "listen",
+        CONF_MODEL_NAME: "gpt-4o-mini-transcribe",
+        "prompt": "New instructions",
+    }
+
+
+async def test_entra_stt_openai_retains_discovery_identity(
+    hass: HomeAssistant, entra_stt_entry: MockConfigEntry
+) -> None:
+    """Missing backend means OpenAI, and editing its prompt retains discovery ownership."""
+    entry = entra_stt_entry
+    subentry = next(iter(entry.subentries.values()))
+    original_id, original_unique_id = subentry.subentry_id, subentry.unique_id
+    result = await hass.config_entries.subentries.async_init(
+        (entry.entry_id, "stt"),
+        context={"source": "reconfigure", "subentry_id": original_id},
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {CONF_STT_BACKEND: STT_BACKEND_OPENAI}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {"prompt": "Updated"}
+    )
+    assert result["reason"] == "reconfigure_successful"
+    assert subentry.subentry_id == original_id
+    assert subentry.unique_id == original_unique_id
+    assert subentry.data[CONF_CHAT_MODEL] == "listen"
+    assert subentry.data[CONF_AUTO_DISCOVERED] is True
+    assert subentry.data[CONF_STT_BACKEND] == STT_BACKEND_OPENAI
+
+
+async def test_mai_stt_reconfigure_keeps_selected_model(
+    hass: HomeAssistant, entra_stt_entry: MockConfigEntry
+) -> None:
+    """Editing a Speech endpoint keeps a saved non-default MAI model and entity ID."""
+    entry = entra_stt_entry
+    subentry = next(iter(entry.subentries.values()))
+    original_id = subentry.subentry_id
+    context = {"source": "reconfigure", "subentry_id": original_id}
+    result = await hass.config_entries.subentries.async_init(
+        (entry.entry_id, "stt"), context=context
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {CONF_STT_BACKEND: STT_BACKEND_MAI_FILE}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        {
+            CONF_MAI_MODEL: "MAI-Transcribe-1.5",
+            CONF_SPEECH_ENDPOINT: "https://first.cognitiveservices.azure.com/",
+        },
+    )
+    result = await hass.config_entries.subentries.async_init(
+        (entry.entry_id, "stt"), context=context
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {CONF_STT_BACKEND: STT_BACKEND_MAI_FILE}
+    )
+    fields = _form_fields(result)
+    assert fields[CONF_MAI_MODEL]["default"] == "MAI-Transcribe-1.5"
+    assert fields[CONF_SPEECH_ENDPOINT]["description"]["suggested_value"] == (
+        "https://first.cognitiveservices.azure.com/"
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        {CONF_SPEECH_ENDPOINT: "https://second.cognitiveservices.azure.com/"},
+    )
+    assert result["reason"] == "reconfigure_successful"
+    assert subentry.subentry_id == original_id
+    assert subentry.unique_id is None
+    assert subentry.data == {
+        CONF_STT_BACKEND: STT_BACKEND_MAI_FILE,
+        CONF_MAI_MODEL: "MAI-Transcribe-1.5",
+        CONF_SPEECH_ENDPOINT: "https://second.cognitiveservices.azure.com/",
+    }
+
+
+@pytest.mark.parametrize("auth_type", [None, AUTH_API_KEY])
+async def test_api_key_stt_ui_unchanged_even_with_token(
+    hass: HomeAssistant, auth_type: str | None
+) -> None:
+    """A token-like field cannot enable MAI for explicit or legacy API-key entries."""
+    data = {
+        CONF_API_BASE: ENDPOINT,
+        "api_key": "test-key",
+        "token": {"access_token": "not-an-entra-entry"},
+    }
+    if auth_type is not None:
+        data[CONF_AUTH_TYPE] = auth_type
+    entry = MockConfigEntry(
+        domain=DOMAIN, data=data, state=ConfigEntryState.LOADED, version=2
+    )
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.subentries.async_init(
+        (entry.entry_id, "stt"), context={"source": "user"}
+    )
+    assert result["step_id"] == "init"
+    assert set(_form_fields(result)) == {"name", "prompt", CONF_CHAT_MODEL}
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        {"name": "OpenAI speech", CONF_CHAT_MODEL: "custom-transcription"},
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    subentry = next(iter(entry.subentries.values()))
+    assert subentry.data[CONF_CHAT_MODEL] == "custom-transcription"
+    assert CONF_STT_BACKEND not in subentry.data
+    assert CONF_MAI_MODEL not in subentry.data
+    assert CONF_SPEECH_ENDPOINT not in subentry.data
+
+
+@pytest.mark.parametrize("backend", ["mai_realtime", "unknown"])
+async def test_stt_rejects_forged_backend(
+    entra_stt_entry: MockConfigEntry, backend: str
+) -> None:
+    """Only the shipped OpenAI and MAI file backends can be selected or saved."""
+    flow = AzureOpenAISubentrySTTFlowHandler()
+    flow.options = {}
+    with patch.object(flow, "_get_entry", return_value=entra_stt_entry):
+        result = await flow.async_step_backend({CONF_STT_BACKEND: backend})
+        assert result["errors"] == {CONF_STT_BACKEND: "backend_not_supported"}
+        assert flow.options == {}
+        flow.options = {CONF_STT_BACKEND: backend}
+        result = await flow.async_step_init()
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "backend_not_supported"
+
+
+@pytest.mark.parametrize("auth_type", [None, AUTH_API_KEY])
+@pytest.mark.parametrize("step", ["backend", "mai", "init"])
+async def test_stt_rejects_forged_mai_for_api_key_auth(
+    auth_type: str | None, step: str
+) -> None:
+    """Bypassing the backend selector cannot authorize a Speech request with API keys."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_AUTH_TYPE: auth_type, "token": {"access_token": "spoofed"}},
+        state=ConfigEntryState.LOADED,
+        version=2,
+    )
+    flow = AzureOpenAISubentrySTTFlowHandler()
+    flow.options = {CONF_STT_BACKEND: STT_BACKEND_MAI_FILE}
+    with patch.object(flow, "_get_entry", return_value=entry):
+        result = await getattr(flow, f"async_step_{step}")()
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "backend_not_supported"
+
+
+async def test_mai_stt_rejects_forged_model(entra_stt_entry: MockConfigEntry) -> None:
+    """MAI model validation also runs if a caller bypasses the select-field validator."""
+    flow = AzureOpenAISubentrySTTFlowHandler()
+    flow.context = {"source": "user"}
+    flow.options = {CONF_STT_BACKEND: STT_BACKEND_MAI_FILE}
+    with patch.object(flow, "_get_entry", return_value=entra_stt_entry):
+        result = await flow.async_step_mai(
+            {
+                "name": "Invalid model",
+                CONF_MAI_MODEL: "not-a-mai-model",
+                CONF_SPEECH_ENDPOINT: "https://speech.cognitiveservices.azure.com/",
+            }
+        )
+    assert result["errors"] == {CONF_MAI_MODEL: "model_not_supported"}
+    assert flow.options == {CONF_STT_BACKEND: STT_BACKEND_MAI_FILE}
 
 
 @pytest.mark.parametrize("language", LANGUAGES)
