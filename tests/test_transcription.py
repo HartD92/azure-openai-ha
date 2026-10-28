@@ -17,7 +17,7 @@ from respx import MockRouter
 
 from homeassistant.components import stt
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryError
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryError
 from homeassistant.helpers.httpx_client import get_async_client
 from homeassistant.helpers import entity_registry as er
 
@@ -331,6 +331,7 @@ async def test_mai_entity_error_and_reauth(
     mai_backend: MAIFileTranscriptionBackend,
     metadata: stt.SpeechMetadata,
     respx_mock: MockRouter,
+    caplog: pytest.LogCaptureFixture,
     status: int,
 ) -> None:
     """Empty results fail; a rejected bearer token requests native reauthentication."""
@@ -344,6 +345,9 @@ async def test_mai_entity_error_and_reauth(
     assert result.result is stt.SpeechResultState.ERROR
     assert result.text is None
     assert reauth.call_count == (1 if status == 401 else 0)
+    if status == 401:
+        assert "Azure Speech rejected the Entra token (HTTP 401)" in caplog.text
+        assert "expired" not in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -505,6 +509,7 @@ async def test_runtime_token_failure(
     metadata: stt.SpeechMetadata,
     aioclient_mock,
     respx_mock: MockRouter,
+    caplog: pytest.LogCaptureFixture,
     status: int,
 ) -> None:
     """Revoked grants request reauth; transient refresh errors fail without uploading."""
@@ -527,6 +532,9 @@ async def test_runtime_token_failure(
     assert result.result is stt.SpeechResultState.ERROR
     assert reauth.call_count == (1 if status == 400 else 0)
     assert not respx_mock.calls
+    if status == 400:
+        assert "STT OAuth token refresh was rejected" in caplog.text
+        assert "Azure Speech rejected" not in caplog.text
 
 
 @pytest.mark.usefixtures("native_exposed_entities")
@@ -570,3 +578,82 @@ async def test_mai_platform_setup_and_reload(
     assert len(route.calls) == 1
     assert await hass.config_entries.async_unload(mai_entry.entry_id)
     await hass.async_block_till_done()
+
+
+@pytest.mark.parametrize(
+    ("message", "reason"),
+    [
+        (
+            "The principal lacks the required data action for this operation",
+            "RBAC data action denied",
+        ),
+        (
+            "The principal does not have authorization to perform this action",
+            "RBAC action denied",
+        ),
+        ("Access denied: invalid audience", "token audience rejected"),
+        ("Access denied: audience is incorrect", "token audience rejected"),
+        ("The token is expired", "token expired"),
+        ("The token has expired", "token expired"),
+        (
+            "Access denied due to invalid subscription key or wrong API endpoint.",
+            "gateway rejected credentials or resource endpoint",
+        ),
+    ],
+)
+async def test_speech_auth_failure_has_safe_diagnostics(
+    mai_backend: MAIFileTranscriptionBackend,
+    metadata: stt.SpeechMetadata,
+    respx_mock: MockRouter,
+    message: str,
+    reason: str,
+) -> None:
+    """Keep useful Azure categories and request IDs without exposing raw service text."""
+    request_id = "12345678-1234-1234-1234-123456789abc"
+    respx_mock.post(TRANSCRIBE_URL).respond(
+        401,
+        json={
+            "error": {
+                "code": "Unauthorized",
+                "message": f"{message} sensitive-service-text",
+            }
+        },
+        headers={"apim-request-id": request_id},
+    )
+    with pytest.raises(ConfigEntryAuthFailed) as err:
+        await mai_backend.async_transcribe(metadata, audio())
+    diagnostic = str(err.value)
+    assert "HTTP 401" in diagnostic
+    assert "Azure code Unauthorized" in diagnostic
+    assert f"request ID {request_id}" in diagnostic
+    assert reason in diagnostic
+    assert "sensitive-service-text" not in diagnostic
+
+
+@pytest.mark.parametrize(
+    ("body", "headers", "expected"),
+    [
+        (b"secret-html", {}, "non-JSON error response"),
+        (
+            b'{"error":{"code":"secret-code","message":"secret-message"}}',
+            {"apim-request-id": "secret-header"},
+            "HTTP 401",
+        ),
+        (b'{"error":"secret"}', {}, "HTTP 401"),
+        (b"null", {}, "HTTP 401"),
+    ],
+)
+async def test_speech_auth_failure_does_not_log_untrusted_details(
+    mai_backend: MAIFileTranscriptionBackend,
+    metadata: stt.SpeechMetadata,
+    respx_mock: MockRouter,
+    body: bytes,
+    headers: dict[str, str],
+    expected: str,
+) -> None:
+    """Malformed and unexpected error payloads remain failures without leaking data."""
+    respx_mock.post(TRANSCRIBE_URL).respond(401, content=body, headers=headers)
+    with pytest.raises(ConfigEntryAuthFailed) as err:
+        await mai_backend.async_transcribe(metadata, audio())
+    assert expected in str(err.value)
+    assert "secret" not in str(err.value)
