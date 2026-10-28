@@ -276,10 +276,13 @@
     },
     "stt": {
       "abort": {
+        "backend_not_supported": "This transcription backend requires Microsoft Entra ID sign-in.",
         "entry_not_loaded": "Nie można dodawać elementów, gdy konfiguracja jest wyłączona."
       },
       "entry_type": "Zamiana mowy na tekst",
       "error": {
+        "backend_not_supported": "Select OpenAI or MAI file transcription.",
+        "invalid_speech_endpoint": "Enter an HTTPS resource root ending in .cognitiveservices.azure.com, without a path, query, credentials, fragment, or non-443 port.",
         "model_not_supported": "Wybierz obsługiwane wdrożenie zamiany mowy na tekst."
       },
       "initiate_flow": {
@@ -287,6 +290,25 @@
         "user": "Dodaj usługę zamiany mowy na tekst"
       },
       "step": {
+        "backend": {
+          "title": "Transcription backend",
+          "data": {
+            "stt_backend": "Backend"
+          },
+          "description": "OpenAI uses a deployed transcription model. MAI file transcription uses Microsoft Speech with your Microsoft account and requires the Cognitive Services Speech User role."
+        },
+        "mai": {
+          "title": "MAI file transcription",
+          "data": {
+            "name": "Name",
+            "mai_model": "MAI model",
+            "speech_endpoint": "Speech resource endpoint"
+          },
+          "data_description": {
+            "mai_model": "The Microsoft Speech model, not an OpenAI deployment name. File transcription only; realtime streaming is not supported.",
+            "speech_endpoint": "The resource root, for example https://your-resource.cognitiveservices.azure.com/. Requires Microsoft Entra ID and Cognitive Services Speech User access; API keys are not supported."
+          }
+        },
         "init": {
           "data": {
             "chat_model": "Wdrożenie modelu",
@@ -330,6 +352,12 @@
     }
   },
   "selector": {
+    "stt_backend": {
+      "options": {
+        "openai": "OpenAI deployment",
+        "mai_file": "MAI file transcription (Microsoft Speech)"
+      }
+    },
     "image_quality": {
       "options": {
         "auto": "auto",

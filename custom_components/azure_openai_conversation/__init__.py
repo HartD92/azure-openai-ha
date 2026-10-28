@@ -19,14 +19,13 @@ from homeassistant.exceptions import (
     ConfigEntryNotReady,
 )
 from homeassistant.helpers import (
-    config_entry_oauth2_flow,
     config_validation as cv,
     device_registry as dr,
     entity_registry as er,
 )
 from homeassistant.helpers.httpx_client import get_async_client
 
-from .auth import async_get_oauth_implementation
+from .auth import async_get_inference_session
 from .const import (
     AUTH_API_KEY,
     AUTH_ENTRA_ID,
@@ -113,17 +112,11 @@ async def async_create_entry_client(
         raise ConfigEntryError("Unsupported Azure OpenAI authentication method")
     try:
         api_base = validate_inference_endpoint(entry.data[CONF_API_BASE])
-        implementation = await async_get_oauth_implementation(hass, entry)
     except ValueError as err:
         raise ConfigEntryError(
             "Invalid Entra tenant or Azure inference endpoint"
         ) from err
-    except config_entry_oauth2_flow.UnknownImplementationError as err:
-        raise ConfigEntryAuthFailed(
-            "Microsoft OAuth application credentials are missing"
-        ) from err
-    session = config_entry_oauth2_flow.OAuth2Session(hass, entry, implementation)
-    await session.async_ensure_token_valid()
+    session = await async_get_inference_session(hass, entry)
 
     async def token_provider() -> str:
         await session.async_ensure_token_valid()

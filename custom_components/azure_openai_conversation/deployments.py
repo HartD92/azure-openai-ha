@@ -21,6 +21,7 @@ from .const import (
     CONF_DEPLOYMENTS,
     CONF_IMAGE_MODEL,
     CONF_MODEL_NAME,
+    CONF_STT_BACKEND,
     DEFAULT_AI_TASK_NAME,
     DEFAULT_CONVERSATION_NAME,
     DEFAULT_IMAGE_TASK_NAME,
@@ -35,6 +36,7 @@ from .const import (
     RECOMMENDED_STT_MODEL,
     RECOMMENDED_TTS_MODEL,
     RECOMMENDED_TTS_OPTIONS,
+    STT_BACKEND_OPENAI,
     UNSUPPORTED_MODELS,
 )
 
@@ -391,6 +393,11 @@ def _existing_subentries(
         subentry
         for subentry in entry.subentries.values()
         if subentry.subentry_type == service
+        and (
+            service != "stt"
+            or subentry.data.get(CONF_STT_BACKEND, STT_BACKEND_OPENAI)
+            == STT_BACKEND_OPENAI
+        )
         and subentry.data.get(model_key, _LEGACY_MODELS[service]) == deployment_name
     ]
 

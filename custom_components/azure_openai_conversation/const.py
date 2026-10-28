@@ -25,6 +25,7 @@ CONF_IMAGE_MODEL = "image_model"
 CONF_IMAGE_QUALITY = "image_quality"
 CONF_DEPLOYMENTS = "deployments"
 CONF_MODEL_NAME = "model_name"
+CONF_MAI_MODEL = "mai_model"
 CONF_RESOURCE_ID = "resource_id"
 CONF_TENANT_ID = "tenant_id"
 CONF_MAX_TOKENS = "max_tokens"
@@ -34,6 +35,8 @@ CONF_REASONING_SUMMARY = "reasoning_summary"
 CONF_RECOMMENDED = "recommended"
 CONF_SEND_SAMPLING_PARAMETERS = "send_sampling_parameters"
 CONF_STORE_RESPONSES = "store_responses"
+CONF_STT_BACKEND = "stt_backend"
+CONF_SPEECH_ENDPOINT = "speech_endpoint"
 CONF_TEMPERATURE = "temperature"
 CONF_TOP_P = "top_p"
 CONF_TTS_SPEED = "tts_speed"
@@ -61,6 +64,7 @@ RECOMMENDED_REASONING_SUMMARY = "auto"
 RECOMMENDED_SEND_SAMPLING_PARAMETERS = False
 RECOMMENDED_STORE_RESPONSES = False
 RECOMMENDED_STT_MODEL = "gpt-4o-mini-transcribe"
+RECOMMENDED_MAI_MODEL = "MAI-Transcribe-2"
 RECOMMENDED_TEMPERATURE = 1.0
 RECOMMENDED_TOP_P = 1.0
 RECOMMENDED_TTS_MODEL = "gpt-4o-mini-tts"
@@ -89,6 +93,9 @@ STT_MODELS: list[str] = [
     "gpt-4o-mini-transcribe",
     "whisper",
 ]
+STT_BACKEND_OPENAI = "openai"
+STT_BACKEND_MAI_FILE = "mai_file"
+MAI_MODELS = ["MAI-Transcribe-2", "MAI-Transcribe-1.5"]
 TTS_MODELS: list[str] = ["gpt-4o-mini-tts", "tts", "tts-hd", "tts-1", "tts-1-hd"]
 
 UNSUPPORTED_MODELS: list[str] = [
