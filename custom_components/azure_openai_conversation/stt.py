@@ -116,9 +116,11 @@ class AzureOpenAISTTEntity(stt.SpeechToTextEntity, AzureOpenAIBaseLLMEntity):
             text = await self._backend.async_transcribe(metadata, stream)
         except OAuth2TokenRequestReauthError:
             # OAuth2Session already starts reauthentication for rejected refresh grants.
-            _LOGGER.error("STT authentication expired; Microsoft sign-in is required")
-        except ConfigEntryAuthFailed:
-            _LOGGER.error("STT authentication expired; Microsoft sign-in is required")
+            _LOGGER.error(
+                "STT OAuth token refresh was rejected; Microsoft sign-in is required"
+            )
+        except ConfigEntryAuthFailed as err:
+            _LOGGER.error("STT authentication failed: %s", err)
             self.entry.async_start_reauth(self.hass)
         except OAuth2TokenRequestError, OAuth2TokenRequestConnectionError:
             _LOGGER.error("Unable to renew the STT authentication token")

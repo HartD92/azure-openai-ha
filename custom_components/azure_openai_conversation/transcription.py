@@ -51,6 +51,33 @@ _MAX_SPEECH_AUDIO_BYTES = 250 * 1024 * 1024
 _SPEECH_HOST = re.compile(
     r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cognitiveservices\.azure\.com"
 )
+_AZURE_REQUEST_ID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+_AUTH_ERROR_CODES = frozenset(
+    {
+        "401",
+        "403",
+        "Unauthorized",
+        "Forbidden",
+        "PermissionDenied",
+        "AuthenticationFailed",
+        "InvalidAuthenticationToken",
+        "InvalidAuthenticationTokenAudience",
+        "InvalidSubscriptionKey",
+        "AccessDenied",
+    }
+)
+_AUTH_ERROR_REASONS = (
+    ("lacks the required data action", "RBAC data action denied"),
+    ("does not have authorization to perform", "RBAC action denied"),
+    ("audience is incorrect", "token audience rejected"),
+    ("invalid audience", "token audience rejected"),
+    ("token is expired", "token expired"),
+    ("token has expired", "token expired"),
+    (
+        "invalid subscription key or wrong api endpoint",
+        "gateway rejected credentials or resource endpoint",
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -218,6 +245,31 @@ class TranscriptionError(HomeAssistantError):
     """A transcription request or response could not be processed."""
 
 
+def _speech_auth_details(response: httpx.Response) -> str:
+    """Extract known error categories, never arbitrary service text or credentials."""
+    details = [f"HTTP {response.status_code}"]
+    request_id = response.headers.get("apim-request-id") or response.headers.get(
+        "x-ms-request-id"
+    )
+    if request_id and _AZURE_REQUEST_ID.fullmatch(request_id):
+        details.append(f"request ID {request_id}")
+    try:
+        payload = response.json()
+    except ValueError:
+        details.append("non-JSON error response")
+        return "; ".join(details)
+    if isinstance(payload, dict) and isinstance(error := payload.get("error"), dict):
+        code = error.get("code")
+        if isinstance(code, str) and code in _AUTH_ERROR_CODES:
+            details.append(f"Azure code {code}")
+        if isinstance(message := error.get("message"), str):
+            for phrase, reason in _AUTH_ERROR_REASONS:
+                if phrase in message.casefold():
+                    details.append(reason)
+                    break
+    return "; ".join(details)
+
+
 class TranscriptionBackend(Protocol):
     """Consume live audio without imposing buffering on future transports."""
 
@@ -369,10 +421,14 @@ class MAIFileTranscriptionBackend:
         except httpx.RequestError as err:
             raise TranscriptionError("Unable to connect to Azure Speech") from err
         if response.status_code == 401:
-            raise ConfigEntryAuthFailed("Azure Speech rejected the Entra token")
+            raise ConfigEntryAuthFailed(
+                f"Azure Speech rejected the Entra token ({_speech_auth_details(response)}). "
+                "Check the Speech resource endpoint, signed-in identity, and Speech permissions"
+            )
         if response.status_code == 403:
             raise TranscriptionError(
-                "Azure Speech access denied; grant Cognitive Services Speech User "
+                f"Azure Speech access denied ({_speech_auth_details(response)}); "
+                "grant Cognitive Services Speech User "
                 "access on the Speech resource"
             )
         if response.status_code != 200:
